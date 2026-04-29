@@ -1,23 +1,23 @@
 # CICD-DEMO
 
-Proyecto de demostración de integración y entrega continua (CI/CD) con Jenkins, SonarQube y Trivy.  
-Aplicación Spring Boot con pipeline declarativo completo: build, análisis estático, escaneo de seguridad y despliegue local.
+A CI/CD demonstration project using Jenkins, SonarQube, and Trivy.  
+Spring Boot application with a complete declarative pipeline: build, static analysis, container security scanning, and local deployment.
 
 ---
 
-## Arquitectura del Pipeline
+## Pipeline Architecture
 
 ```
 Git Push
    │
    ▼
 ┌─────────────┐
-│  Checkout   │  Clona el repositorio desde SCM
+│  Checkout   │  Clones the repository from SCM
 └──────┬──────┘
        │
        ▼
 ┌─────────────────┐
-│  Build & Test   │  mvn clean package  (unit tests incluidos)
+│  Build & Test   │  mvn clean package  (unit tests + JaCoCo coverage)
 └──────┬──────────┘
        │
        ▼
@@ -33,148 +33,201 @@ Git Push
        │
        ▼
 ┌──────────────────────────┐
-│ Quality Gate             │  Falla si:
+│ Quality Gate             │  Fails if:
 │                          │  • QG status != OK
-│                          │  • Security Hotspots sin revisar > 0
+│                          │  • Security Hotspots pending review > 0
 └──────┬───────────────────┘
        │
        ▼
 ┌──────────────────────────┐
 │ Container Security Scan  │  trivy image --severity CRITICAL
-│ (Trivy)                  │  Falla si hay vulnerabilidades CRITICAL
+│ (Trivy)                  │  Fails if any CRITICAL vulnerability found
 └──────┬───────────────────┘
        │
        ▼
-┌─────────────┐   (solo en rama master)
+┌─────────────┐   (master branch only)
 │   Deploy    │  docker run -d -p 80:8080 mi-app:latest
 └─────────────┘
 ```
 
 ---
 
-## Prerrequisitos
+## Tech Stack
 
-| Herramienta | Versión mínima | Notas |
-|-------------|----------------|-------|
-| Docker      | 20+            | Requerido para todos los pasos |
-| Jenkins     | LTS            | Con plugins: Git, Pipeline, SonarQube Scanner, Docker |
-| Trivy       | 0.40+          | Instalado en el agente Jenkins |
-| Java / Maven| JDK 12 / 3.6   | O usar el contenedor `builder` de docker-compose |
+| Component        | Version        | Role                                        |
+|------------------|----------------|---------------------------------------------|
+| Spring Boot      | 2.7.18         | Java application                            |
+| Java             | 21 (JRE Alpine)| Container runtime                           |
+| Maven            | 3.9+           | Build and dependency management             |
+| JaCoCo           | 0.8.11         | Code coverage                               |
+| JUnit            | 4.13.2         | Unit and integration tests                  |
+| Jenkins          | LTS            | CI/CD server                                |
+| SonarQube        | LTS Community  | Static analysis and Quality Gate            |
+| Trivy            | 0.70+          | Docker image vulnerability scanning         |
+| Tomcat (embedded)| 9.0.116        | Embedded web server (no CRITICAL CVEs)      |
+| PostgreSQL       | 13 Alpine      | SonarQube database                          |
 
 ---
 
-## Levantar la infraestructura local
+## Prerequisites
 
-### 1. Jenkins
+| Tool    | Min Version | Notes                                                        |
+|---------|-------------|--------------------------------------------------------------|
+| Docker  | 20+         | Required for all steps                                       |
+| Jenkins | LTS         | Plugins: Git, Pipeline, SonarQube Scanner, Docker Pipeline   |
+| Trivy   | 0.70+       | Installed inside the Jenkins container                       |
+
+---
+
+## Local Infrastructure Setup
+
+### 1. SonarQube + Database
+
+```bash
+docker-compose up -d sonarqube-db sonarqube
+```
+
+Access `http://localhost:9000` with `admin / admin` (or your configured password).  
+Create a project with key `cicd-demo` and generate an authentication token (type *Global Analysis Token*).
+
+#### Webhook for Quality Gate
+
+In SonarQube → **Administration → Configuration → Webhooks → Create**:
+
+| Field | Value                                    |
+|-------|------------------------------------------|
+| Name  | Jenkins                                  |
+| URL   | `http://jenkins:8080/sonarqube-webhook/` |
+
+> This allows `waitForQualityGate()` to receive the callback instead of timing out in PENDING state.
+
+### 2. Jenkins
 
 ```bash
 docker run -d \
   --name jenkins \
+  --network cicd-design_default \
   -p 8080:8080 -p 50000:50000 \
   -v jenkins_home:/var/jenkins_home \
   -v /var/run/docker.sock:/var/run/docker.sock \
   jenkins/jenkins:lts
 ```
 
-> Monta el socket de Docker para que Jenkins pueda ejecutar `docker build` y `docker run`.
+> The `cicd-design_default` network is created by docker-compose. This lets Jenkins resolve `sonarqube:9000` by service name.
 
-Desbloquea Jenkins en `http://localhost:8080` e instala los plugins sugeridos más:
+Unlock Jenkins at `http://localhost:8080` and install the suggested plugins plus:
 - **SonarQube Scanner**
 - **Docker Pipeline**
 
-### 2. SonarQube
+#### Additional tools inside the Jenkins container
 
 ```bash
-docker-compose up -d sonarqube-db sonarqube
+docker exec -u root jenkins bash -c "
+  # Maven
+  apt-get update && apt-get install -y maven
+
+  # Docker CLI
+  curl -fsSL https://get.docker.com | sh
+
+  # Trivy
+  curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh \
+    | sh -s -- -b /usr/local/bin
+"
 ```
 
-Accede a `http://localhost:9000` (admin / admin).  
-Crea un proyecto con key `cicd-demo` y genera un token de autenticación.
+### 3. Jenkins Configuration
 
-### 3. Trivy (en el agente Jenkins)
+#### SonarQube Token Credential
 
-```bash
-# macOS
-brew install aquasecurity/trivy/trivy
+**Manage Jenkins → Credentials → Global → Add Credential**:
 
-# Linux
-curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh | sh -s -- -b /usr/local/bin
-```
+| Field  | Value                          |
+|--------|--------------------------------|
+| Kind   | Secret text                    |
+| ID     | `SONAR_AUTH_TOKEN`             |
+| Secret | Token generated in SonarQube   |
 
----
+#### SonarQube Server
 
-## Configuración en Jenkins
+**Manage Jenkins → Configure System → SonarQube servers**:
 
-### Credenciales necesarias
+| Field | Value                   |
+|-------|-------------------------|
+| Name  | `SonarQube`             |
+| URL   | `http://sonarqube:9000` |
+| Token | `SONAR_AUTH_TOKEN`      |
 
-| ID en Jenkins       | Tipo   | Descripción                         |
-|---------------------|--------|-------------------------------------|
-| `SONAR_AUTH_TOKEN`  | Secret | Token de autenticación de SonarQube |
+#### Create the Pipeline Job
 
-### SonarQube Server
-
-En **Manage Jenkins → Configure System → SonarQube servers**:
-- Name: `SonarQube`
-- URL: `http://sonarqube:9000`
-- Token: la credencial `SONAR_AUTH_TOKEN`
-
-> Si Jenkins y SonarQube están en la misma red Docker, usa el nombre de servicio `sonarqube`. Si corren por separado, usa `http://localhost:9000`.
-
-### Configurar el Pipeline
-
-1. Crea un nuevo job tipo **Pipeline**.
-2. En *Pipeline Definition* selecciona **Pipeline script from SCM**.
-3. SCM: Git → URL del repositorio.
+1. New item → type **Pipeline**.
+2. *Pipeline Definition* → **Pipeline script from SCM**.
+3. SCM: Git → repository URL.
 4. Script Path: `Jenkinsfile`.
 
 ---
 
-## Puertas de Calidad (Quality Gates)
+## Quality Gates
 
-El pipeline falla automáticamente en dos escenarios:
+The pipeline fails automatically in the following scenarios:
 
-| Herramienta | Condición de fallo |
-|-------------|-------------------|
-| SonarQube   | Quality Gate con estado distinto a `OK` **o** al menos 1 Security Hotspot sin revisar |
-| Trivy       | Al menos 1 vulnerabilidad de severidad `CRITICAL` en la imagen Docker |
+| Tool       | Failure condition                                              |
+|------------|----------------------------------------------------------------|
+| SonarQube  | Quality Gate status is not `OK`                               |
+| SonarQube  | At least 1 Security Hotspot with status `TO_REVIEW`           |
+| Trivy      | At least 1 `CRITICAL` vulnerability found in the Docker image |
 
----
+### `.trivyignore` file
 
-## Prueba del Pipeline
+The `.trivyignore` file at the project root suppresses explicitly accepted CVEs with justification:
 
-1. Haz un cambio en el código (p. ej. agrega código con deuda técnica en `ApiController.java`).
-2. Haz commit y push:
-
-```bash
-git add .
-git commit -m "test: add code change to trigger pipeline"
-git push origin master
+```
+# CVE-2016-1000027: HttpInvoker is not used in this application.
+# Only fixed in Spring 6.0+ (Spring Boot 3.x); migration deferred.
+CVE-2016-1000027
 ```
 
-3. Jenkins detecta el cambio, ejecuta el pipeline y despliega si pasa todas las validaciones.
-4. Verifica la aplicación en `http://localhost:80/api`.
-
 ---
 
-## Bloque `post` y limpieza
-
-El pipeline limpia el workspace al finalizar (éxito o falla) con `cleanWs()`.  
-En caso de falla, el bloque `post { failure { ... } }` registra el error en consola.  
-Para notificaciones por correo, descomenta la línea `mail to:` en el Jenkinsfile y configura el servidor SMTP en Jenkins.
-
----
-
-## Estructura del proyecto
+## Project Structure
 
 ```
 cicd-design/
-├── Jenkinsfile            # Pipeline declarativo completo
-├── Dockerfile             # Imagen Docker de la aplicación
-├── docker-compose.yml     # Jenkins, SonarQube, builder, selenium
-├── Makefile               # Tareas de build y despliegue
-├── pom.xml                # Dependencias Maven (Spring Boot, JaCoCo, Sonar)
+├── Jenkinsfile            # Complete declarative pipeline (7 stages)
+├── Dockerfile             # Docker image: eclipse-temurin:21-jre-alpine
+├── .trivyignore           # Accepted CVEs with justification
+├── docker-compose.yml     # SonarQube + PostgreSQL + builder + selenium
+├── pom.xml                # Spring Boot 2.7.18, JaCoCo 0.8.11, Tomcat 9.0.116
 ├── src/
-│   ├── main/              # Código fuente Spring Boot
-│   └── test/              # Tests unitarios e integración
-└── k8s-config/            # Manifiestos Kubernetes (despliegue en cluster)
+│   ├── main/              # Spring Boot source code
+│   └── test/              # JUnit 4 tests (Unit, Integration, System categories)
+└── k8s-config/            # Kubernetes manifests (cluster deployment)
 ```
+
+---
+
+## Testing the Pipeline
+
+```bash
+# Make a code change, then commit and push
+# Jenkins detects the change and runs the pipeline automatically
+git add .
+git commit -m "test: trigger pipeline"
+git push origin master
+```
+
+If the code passes all quality gates, the application is deployed at `http://localhost:80/api`.
+
+---
+
+## `post` Block and Notifications
+
+The pipeline cleans the workspace on completion (success or failure) via `cleanWs()`.  
+To enable email notifications on failure, uncomment in `Jenkinsfile`:
+
+```groovy
+mail to: 'team@example.com',
+     subject: "FAILURE: ${env.JOB_NAME} #${env.BUILD_NUMBER}",
+     body: "See logs at: ${env.BUILD_URL}"
+```
+
+Then configure the SMTP server in **Manage Jenkins → Configure System → E-mail Notification**.
