@@ -80,7 +80,7 @@ pipeline {
             steps {
                 script {
                     def trivyExit = sh(
-                        script: "trivy image --exit-code 1 --severity CRITICAL --no-progress ${IMAGE_NAME}:${IMAGE_TAG}",
+                        script: "trivy image --exit-code 1 --severity CRITICAL --no-progress --ignorefile .trivyignore ${IMAGE_NAME}:${IMAGE_TAG}",
                         returnStatus: true
                     )
                     if (trivyExit != 0) {
