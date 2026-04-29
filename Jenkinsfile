@@ -64,7 +64,7 @@ pipeline {
                             script: """
                                 curl -s -u ${SONAR_TOKEN}: \
                                   "${SONAR_HOST}/api/hotspots/search?projectKey=${SONAR_PROJECT}&status=TO_REVIEW" \
-                                | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['paging']['total'])"
+                                | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('paging', {}).get('total', 0))"
                             """,
                             returnStdout: true
                         ).trim()
