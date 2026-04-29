@@ -1,13 +1,8 @@
 version: '3.7'
-services:
-  kubectl:
-    image: cmdsolutions/cmdline_kube:13195
-    env_file: .env
-    volumes:
-      - .:/srv/app:Z
-      - ~/.kube:/root/.kube:Z
-    working_dir: /srv/app
 
+services:
+
+  # ── Build / Maven ──────────────────────────────────────────────
   builder:
     image: maven:3.6.0-jdk-10-slim
     env_file: .env
@@ -16,18 +11,52 @@ services:
       - ~/.m2:/root/.m2:Z
     working_dir: /srv/app
 
+  # ── Kubernetes CLI ─────────────────────────────────────────────
+  kubectl:
+    image: cmdsolutions/cmdline_kube:13195
+    env_file: .env
+    volumes:
+      - .:/srv/app:Z
+      - ~/.kube:/root/.kube:Z
+    working_dir: /srv/app
+
+  # ── Selenium ───────────────────────────────────────────────────
   selenium:
     image: selenium/standalone-chrome
 
-  # postgres:
-  #   image:  helderklemp/arminc/clair-db:latest
-  #   env_file: .env
-      
-  # clair:
-  #   image: helderklemp/arminc/clair-local-scan:v2.0.6
-  #   entrypoint: ["/wait-for-it.sh", "postgres:5432", "--"]
-  #   command: ["/clair", "-config=/config/config.yaml"]
-  #   volumes:
-  #     - /var/run/docker.sock:/var/run/docker.sock:Z
-  #   depends_on:
-  #     - postgres  
+  # ── SonarQube (análisis estático) ─────────────────────────────
+  sonarqube-db:
+    image: postgres:13-alpine
+    environment:
+      POSTGRES_USER: sonar
+      POSTGRES_PASSWORD: sonar
+      POSTGRES_DB: sonarqube
+    volumes:
+      - sonarqube_db:/var/lib/postgresql/data
+    restart: unless-stopped
+
+  sonarqube:
+    image: sonarqube:lts-community
+    depends_on:
+      - sonarqube-db
+    environment:
+      SONAR_JDBC_URL: jdbc:postgresql://sonarqube-db:5432/sonarqube
+      SONAR_JDBC_USERNAME: sonar
+      SONAR_JDBC_PASSWORD: sonar
+    ports:
+      - "9000:9000"
+    volumes:
+      - sonarqube_data:/opt/sonarqube/data
+      - sonarqube_extensions:/opt/sonarqube/extensions
+      - sonarqube_logs:/opt/sonarqube/logs
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 65536
+    restart: unless-stopped
+
+volumes:
+  sonarqube_db:
+  sonarqube_data:
+  sonarqube_extensions:
+  sonarqube_logs:
